@@ -1,0 +1,25 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "gig_id": { "type": "keyword" },
+      "freelancer_id": { "type": "keyword" },
+      "slug": { "type": "keyword" },
+      "title": {
+        "type": "text",
+        "fields": {
+          "keyword": { "type": "keyword", "ignore_above": 256 }
+        }
+      },
+      "description": { "type": "text" },
+      "published_at": { "type": "date" },
+      "min_price": { "type": "long" },
+      "picture": { "type": "keyword", "index": false },
+      "reviews_count": { "type": "integer" },
+      "rating": { "type": "float" }
+    }
+  }
+}
