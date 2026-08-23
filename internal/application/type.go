@@ -16,6 +16,11 @@ type EventBroker interface {
 	Close() error
 }
 
+// FileURLClient resolves public file URLs for search document enrichment.
+type FileURLClient interface {
+	GetFileURL(ctx context.Context, fileID string) (string, error)
+}
+
 // SearchService owns gig indexing and public search queries.
 type SearchService interface {
 	ApplyGigPublished(ctx context.Context, payload []byte) error

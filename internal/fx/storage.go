@@ -51,6 +51,10 @@ func InvokeRunMigrations(lc fx.Lifecycle, cfg *config.Config, lg logging.Logger)
 				lg.Error("run elasticsearch migration failed", logging.Err(err))
 				return err
 			}
+			if err := b.CreateProcessedEventsIndex(ctx); err != nil {
+				lg.Error("create elasticsearch processed-events index failed", logging.Err(err))
+				return err
+			}
 			lg.Info("elasticsearch migration applied")
 			return nil
 		},

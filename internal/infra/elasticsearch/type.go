@@ -39,6 +39,7 @@ type SearchResult = domain.SearchResult
 // DocumentStore publishes the concrete persistence boundary.
 type DocumentStore interface {
 	UpsertGig(ctx context.Context, doc domain.GigDocument) error
+	UpdateGigPicture(ctx context.Context, gigID, picture string) error
 	DeleteGig(ctx context.Context, gigID string) error
 	Search(ctx context.Context, q domain.SearchQuery) (*domain.SearchPage, error)
 }

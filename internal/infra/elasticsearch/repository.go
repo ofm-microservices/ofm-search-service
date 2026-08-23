@@ -11,6 +11,17 @@ type repository struct {
 	cl *client
 }
 
+// ClaimEvent atomically records an event in Elasticsearch and returns false
+// when the event was already projected.
+func (r *repository) ClaimEvent(ctx context.Context, eventID string) (bool, error) {
+	return r.cl.claimEvent(ctx, eventID)
+}
+
+// ReleaseEvent removes a failed projection claim so Kafka retry can retry it.
+func (r *repository) ReleaseEvent(ctx context.Context, eventID string) error {
+	return r.cl.releaseEvent(ctx, eventID)
+}
+
 // NewRepository constructs the Elasticsearch-backed search repository.
 func NewRepository(cfg Config) (Repository, error) {
 	cl, err := newClient(cfg)
@@ -22,6 +33,10 @@ func NewRepository(cfg Config) (Repository, error) {
 
 func (r *repository) UpsertGig(ctx context.Context, doc domain.GigDocument) error {
 	return r.cl.upsert(ctx, doc)
+}
+
+func (r *repository) UpdateGigPicture(ctx context.Context, gigID, picture string) error {
+	return r.cl.updatePicture(ctx, gigID, picture)
 }
 
 func (r *repository) DeleteGig(ctx context.Context, gigID string) error {
@@ -54,16 +69,17 @@ func (r *repository) Search(ctx context.Context, q domain.SearchQuery) (*domain.
 
 func toResult(doc domain.GigDocument) domain.SearchResult {
 	return domain.SearchResult{
-		ID:           doc.ID,
-		Title:        doc.Title,
-		Description:  doc.Description,
-		Picture:      doc.Picture,
-		ReviewsCount: doc.ReviewsCount,
-		Rating:       doc.Rating,
-		MinPrice:     doc.MinPrice,
-		Slug:         doc.Slug,
-		FreelancerID: doc.FreelancerID,
-		PublishedAt:  doc.PublishedAt,
+		ID:             doc.ID,
+		Title:          doc.Title,
+		Description:    doc.Description,
+		Picture:        doc.Picture,
+		ReviewsCount:   doc.ReviewsCount,
+		Rating:         doc.Rating,
+		MinPrice:       doc.MinPrice,
+		Slug:           doc.Slug,
+		FreelancerID:   doc.FreelancerID,
+		SellerUsername: doc.SellerUsername,
+		PublishedAt:    doc.PublishedAt,
 	}
 }
 
@@ -96,7 +112,7 @@ func buildSearchBody(q domain.SearchQuery, size int) []byte {
 	query := map[string]any{
 		"size":    size,
 		"sort":    sort,
-		"_source": []string{"title", "description", "gig_id", "freelancer_id", "slug", "published_at", "min_price", "picture", "reviews_count", "rating"},
+		"_source": []string{"title", "description", "gig_id", "freelancer_id", "seller_username", "slug", "published_at", "min_price", "picture", "picture_file_id", "reviews_count", "rating"},
 	}
 	if strings.TrimSpace(q.Query) != "" {
 		query["query"] = map[string]any{

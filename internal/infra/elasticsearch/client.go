@@ -6,6 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"io"
 	"net/http"
 	"net/url"
@@ -19,6 +23,37 @@ type client struct {
 	username   string
 	password   string
 	httpClient *http.Client
+}
+
+func (c *client) processedIndex() string { return c.index + "_processed_events" }
+
+func (c *client) claimEvent(ctx context.Context, eventID string) (bool, error) {
+	if strings.TrimSpace(eventID) == "" {
+		return false, fmt.Errorf("event id is empty")
+	}
+	path := fmt.Sprintf("/%s/_doc/%s?op_type=create&refresh=wait_for", url.PathEscape(c.processedIndex()), url.PathEscape(eventID))
+	data, status, err := c.do(ctx, http.MethodPut, path, []byte(`{"processed":true}`))
+	if err != nil {
+		return false, err
+	}
+	if status == http.StatusConflict {
+		return false, nil
+	}
+	if status >= 300 {
+		return false, fmt.Errorf("claim event %s: status %d: %s", eventID, status, string(data))
+	}
+	return true, nil
+}
+
+func (c *client) releaseEvent(ctx context.Context, eventID string) error {
+	data, status, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/%s/_doc/%s?refresh=wait_for", url.PathEscape(c.processedIndex()), url.PathEscape(eventID)), nil)
+	if err != nil {
+		return err
+	}
+	if status >= 300 && status != http.StatusNotFound {
+		return fmt.Errorf("release event %s: status %d: %s", eventID, status, string(data))
+	}
+	return nil
 }
 
 func newClient(cfg Config) (*client, error) {
@@ -38,8 +73,12 @@ func newClient(cfg Config) (*client, error) {
 }
 
 func (c *client) do(ctx context.Context, method, path string, body []byte) ([]byte, int, error) {
+	ctx, span := otel.Tracer("search-service/database").Start(ctx, "elasticsearch."+method, trace.WithAttributes(attribute.String("db.system", "elasticsearch"), attribute.String("db.operation", method), attribute.String("db.collection.name", c.index)))
+	defer span.End()
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, 0, err
 	}
 	if len(body) > 0 {
@@ -50,12 +89,20 @@ func (c *client) do(ctx context.Context, method, path string, body []byte) ([]by
 	}
 	res, err := c.httpClient.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, 0, err
 	}
 	defer res.Body.Close()
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, res.StatusCode, err
+	}
+	span.SetAttributes(attribute.Int("http.status_code", res.StatusCode))
+	if res.StatusCode >= 300 {
+		span.SetStatus(codes.Error, res.Status)
 	}
 	return data, res.StatusCode, nil
 }
@@ -72,6 +119,26 @@ func (c *client) upsert(ctx context.Context, doc SearchDocument) error {
 	}
 	if status >= 300 {
 		return fmt.Errorf("index gig %s: status %d: %s", doc.ID, status, string(data))
+	}
+	return nil
+}
+
+func (c *client) updatePicture(ctx context.Context, gigID, picture string) error {
+	payload, err := json.Marshal(map[string]any{
+		"doc": map[string]any{
+			"picture": picture,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/%s/_update/%s?refresh=wait_for", c.index, url.PathEscape(gigID))
+	data, status, err := c.do(ctx, http.MethodPost, path, payload)
+	if err != nil {
+		return err
+	}
+	if status >= 300 {
+		return fmt.Errorf("update gig picture %s: status %d: %s", gigID, status, string(data))
 	}
 	return nil
 }
@@ -98,6 +165,17 @@ func (c *client) createIndex(ctx context.Context, body []byte) error {
 	}
 	if status >= 300 {
 		return fmt.Errorf("create index %s: status %d: %s", c.index, status, string(data))
+	}
+	return nil
+}
+
+func (c *client) createProcessedIndex(ctx context.Context) error {
+	data, status, err := c.do(ctx, http.MethodPut, "/"+url.PathEscape(c.processedIndex()), []byte(`{"mappings":{"properties":{"processed":{"type":"boolean"}}}`))
+	if err != nil {
+		return err
+	}
+	if status >= 300 && status != http.StatusBadRequest {
+		return fmt.Errorf("create processed index: status %d: %s", status, string(data))
 	}
 	return nil
 }
