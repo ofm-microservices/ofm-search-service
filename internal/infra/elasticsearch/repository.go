@@ -43,6 +43,11 @@ func (r *repository) DeleteGig(ctx context.Context, gigID string) error {
 	return r.cl.delete(ctx, gigID)
 }
 
+// BulkProject applies upserts and deletes with one Elasticsearch Bulk request.
+func (r *repository) BulkProject(ctx context.Context, upserts []domain.GigDocument, deletes []string) error {
+	return r.cl.bulkProject(ctx, upserts, deletes)
+}
+
 func (r *repository) Search(ctx context.Context, q domain.SearchQuery) (*domain.SearchPage, error) {
 	if q.Limit <= 0 {
 		q.Limit = 20
