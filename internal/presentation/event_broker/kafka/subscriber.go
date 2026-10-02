@@ -31,6 +31,19 @@ func NewGigPublishedSubscriber(cfg config.KafkaConfig, b eventbroker.EventBroker
 
 // Subscribe starts the canonical gig event consumer.
 func (s *GigPublishedSubscriber) Subscribe(ctx context.Context) error {
+	if batcher, ok := s.b.(eventbroker.BatchEventBroker); ok {
+		return batcher.SubscribeBatch(ctx, s.topic, func(ctx context.Context, _ string, messages []eventbroker.Message) error {
+			events := make([]app.ProjectionEvent, 0, len(messages))
+			for _, message := range messages {
+				event, err := mapCanonicalEvent(message.Value)
+				if err != nil {
+					return err
+				}
+				events = append(events, app.ProjectionEvent{Payload: event.payload, AggregateID: event.aggregateID, Deleted: event.deleted})
+			}
+			return s.svc.ApplyGigBatch(ctx, events)
+		})
+	}
 	return s.b.Subscribe(ctx, s.topic, func(ctx context.Context, _ string, payload []byte) error {
 		event, err := mapCanonicalEvent(payload)
 		if err != nil {

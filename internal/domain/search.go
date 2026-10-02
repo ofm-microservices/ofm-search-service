@@ -56,3 +56,9 @@ type SearchRepository interface {
 	DeleteGig(ctx context.Context, gigID string) error
 	Search(ctx context.Context, q SearchQuery) (*SearchPage, error)
 }
+
+// BulkSearchRepository applies independent projections in one storage request.
+type BulkSearchRepository interface {
+	SearchRepository
+	BulkProject(ctx context.Context, upserts []GigDocument, deletes []string) error
+}

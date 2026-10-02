@@ -25,13 +25,121 @@ type client struct {
 	httpClient *http.Client
 }
 
+type bulkItem struct {
+	Index *struct {
+		Status int             `json:"status"`
+		Error  json.RawMessage `json:"error"`
+	} `json:"index,omitempty"`
+	Delete *struct {
+		Status int             `json:"status"`
+		Error  json.RawMessage `json:"error"`
+	} `json:"delete,omitempty"`
+}
+
+type bulkResponse struct {
+	Errors bool       `json:"errors"`
+	Items  []bulkItem `json:"items"`
+}
+
+func (c *client) bulkProject(ctx context.Context, upserts []SearchDocument, deletes []string) error {
+	if len(upserts) == 0 && len(deletes) == 0 {
+		return nil
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		failedUpserts, failedDeletes, err := c.bulkProjectOnce(ctx, upserts, deletes)
+		if err != nil {
+			if attempt == 3 {
+				return err
+			}
+			time.Sleep(time.Duration(attempt*100) * time.Millisecond)
+			continue
+		}
+		if len(failedUpserts) == 0 && len(failedDeletes) == 0 {
+			return nil
+		}
+		upserts, deletes = failedUpserts, failedDeletes
+	}
+	return nil
+}
+
+func (c *client) bulkProjectOnce(ctx context.Context, upserts []SearchDocument, deletes []string) ([]SearchDocument, []string, error) {
+	var body bytes.Buffer
+	for _, doc := range upserts {
+		meta, _ := json.Marshal(map[string]any{"index": map[string]string{"_index": c.index, "_id": doc.ID}})
+		data, err := json.Marshal(doc)
+		if err != nil {
+			return nil, nil, err
+		}
+		body.Write(meta)
+		body.WriteByte('\n')
+		body.Write(data)
+		body.WriteByte('\n')
+	}
+	for _, id := range deletes {
+		meta, _ := json.Marshal(map[string]any{"delete": map[string]string{"_index": c.index, "_id": id}})
+		body.Write(meta)
+		body.WriteByte('\n')
+	}
+	data, status, err := c.doBulk(ctx, body.Bytes())
+	if err != nil {
+		return nil, nil, err
+	}
+	if status >= 300 {
+		return nil, nil, fmt.Errorf("bulk projection status %d: %s", status, string(data))
+	}
+	var result bulkResponse
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, nil, err
+	}
+	if !result.Errors {
+		return nil, nil, nil
+	}
+	failedUpserts := make([]SearchDocument, 0)
+	failedDeletes := make([]string, 0)
+	for i, item := range result.Items {
+		failed := (item.Index != nil && item.Index.Status >= 300) || (item.Delete != nil && item.Delete.Status >= 300 && item.Delete.Status != http.StatusNotFound)
+		if !failed {
+			continue
+		}
+		if i < len(upserts) {
+			failedUpserts = append(failedUpserts, upserts[i])
+		} else {
+			deleteIndex := i - len(upserts)
+			if deleteIndex < len(deletes) {
+				failedDeletes = append(failedDeletes, deletes[deleteIndex])
+			}
+		}
+	}
+	return failedUpserts, failedDeletes, nil
+}
+
+func (c *client) doBulk(ctx context.Context, body []byte) ([]byte, int, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/_bulk?refresh=false", bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Content-Type", "application/x-ndjson")
+	if c.username != "" {
+		req.SetBasicAuth(c.username, c.password)
+	}
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer res.Body.Close()
+	data, err := io.ReadAll(res.Body)
+	return data, res.StatusCode, err
+}
+
 func (c *client) processedIndex() string { return c.index + "_processed_events" }
 
 func (c *client) claimEvent(ctx context.Context, eventID string) (bool, error) {
 	if strings.TrimSpace(eventID) == "" {
 		return false, fmt.Errorf("event id is empty")
 	}
-	path := fmt.Sprintf("/%s/_doc/%s?op_type=create&refresh=wait_for", url.PathEscape(c.processedIndex()), url.PathEscape(eventID))
+	path := fmt.Sprintf("/%s/_doc/%s?op_type=create&refresh=false", url.PathEscape(c.processedIndex()), url.PathEscape(eventID))
 	data, status, err := c.do(ctx, http.MethodPut, path, []byte(`{"processed":true}`))
 	if err != nil {
 		return false, err
@@ -46,7 +154,7 @@ func (c *client) claimEvent(ctx context.Context, eventID string) (bool, error) {
 }
 
 func (c *client) releaseEvent(ctx context.Context, eventID string) error {
-	data, status, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/%s/_doc/%s?refresh=wait_for", url.PathEscape(c.processedIndex()), url.PathEscape(eventID)), nil)
+	data, status, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/%s/_doc/%s?refresh=false", url.PathEscape(c.processedIndex()), url.PathEscape(eventID)), nil)
 	if err != nil {
 		return err
 	}
@@ -112,7 +220,7 @@ func (c *client) upsert(ctx context.Context, doc SearchDocument) error {
 	if err != nil {
 		return err
 	}
-	path := fmt.Sprintf("/%s/_doc/%s?refresh=wait_for", c.index, url.PathEscape(doc.ID))
+	path := fmt.Sprintf("/%s/_doc/%s?refresh=false", c.index, url.PathEscape(doc.ID))
 	data, status, err := c.do(ctx, http.MethodPut, path, payload)
 	if err != nil {
 		return err
@@ -132,7 +240,7 @@ func (c *client) updatePicture(ctx context.Context, gigID, picture string) error
 	if err != nil {
 		return err
 	}
-	path := fmt.Sprintf("/%s/_update/%s?refresh=wait_for", c.index, url.PathEscape(gigID))
+	path := fmt.Sprintf("/%s/_update/%s?refresh=false", c.index, url.PathEscape(gigID))
 	data, status, err := c.do(ctx, http.MethodPost, path, payload)
 	if err != nil {
 		return err
@@ -181,7 +289,7 @@ func (c *client) createProcessedIndex(ctx context.Context) error {
 }
 
 func (c *client) delete(ctx context.Context, gigID string) error {
-	path := fmt.Sprintf("/%s/_doc/%s?refresh=wait_for", c.index, url.PathEscape(gigID))
+	path := fmt.Sprintf("/%s/_doc/%s?refresh=false", c.index, url.PathEscape(gigID))
 	data, status, err := c.do(ctx, http.MethodDelete, path, nil)
 	if err != nil {
 		return err

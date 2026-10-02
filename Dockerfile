@@ -1,4 +1,4 @@
-FROM golang:1.25.5 AS builder
+FROM golang:1.25.11 AS builder
 
 WORKDIR /src
 
@@ -9,7 +9,7 @@ WORKDIR /src/ofm-search-service
 
 RUN go mod download
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/search-service ./cmd/search-service
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=mod -o /out/search-service ./cmd/search-service
 
 FROM debian:bookworm-slim
 

@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"fmt"
 	"search-service/internal/domain"
 	"strings"
 	"time"
@@ -92,6 +93,34 @@ func (s *searchService) ApplyGigDeleted(ctx context.Context, payload []byte) err
 		return nil
 	}
 	return s.repo.DeleteGig(ctx, gigID)
+}
+
+// ApplyGigBatch converts and persists multiple gig events with one bulk request.
+func (s *searchService) ApplyGigBatch(ctx context.Context, events []ProjectionEvent) error {
+	bulk, ok := s.repo.(domain.BulkSearchRepository)
+	if !ok {
+		return fmt.Errorf("search repository does not support bulk projection")
+	}
+	upserts := make([]domain.GigDocument, 0, len(events))
+	deletes := make([]string, 0)
+	for _, event := range events {
+		if event.Deleted {
+			if id := strings.TrimSpace(event.AggregateID); id != "" {
+				deletes = append(deletes, id)
+			}
+			continue
+		}
+		parsed, err := parseGigPublished(event.Payload)
+		if err != nil {
+			return err
+		}
+		doc := buildDocument(parsed)
+		if strings.TrimSpace(doc.ID) == "" {
+			return domain.ErrInvalidQuery
+		}
+		upserts = append(upserts, doc)
+	}
+	return bulk.BulkProject(ctx, upserts, deletes)
 }
 
 func (s *searchService) Search(ctx context.Context, q domain.SearchQuery) (*domain.SearchPage, error) {

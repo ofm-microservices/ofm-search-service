@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
+	commonevents "github.com/ofm-microservices/ofm-common/pkg/events"
+	transportkafka "github.com/ofm-microservices/ofm-common/pkg/observability/kafka"
 	"search-service/config"
 	eventbroker "search-service/internal/presentation/event_broker"
 
@@ -42,12 +45,17 @@ func NewBroker(cfg config.KafkaConfig, log logging.Logger) (eventbroker.EventBro
 }
 
 func (b *broker) Publish(ctx context.Context, subject string, payload []byte) error {
+	enveloped, _, err := commonevents.Wrap(subject, payload)
+	if err != nil {
+		return err
+	}
 	if err := b.ensureTopic(ctx, subject); err != nil {
 		return err
 	}
-	w := &kafka.Writer{Addr: kafka.TCP(b.brokers...), Topic: subject, Balancer: &kafka.Hash{}}
+	w := &kafka.Writer{Addr: kafka.TCP(b.brokers...), Topic: subject, Balancer: &kafka.Hash{}, BatchSize: 100, BatchTimeout: 50 * time.Millisecond}
 	defer w.Close()
-	return w.WriteMessages(ctx, kafka.Message{Value: payload, Headers: kafkaHeaders(ctx)})
+	transportkafka.Published(subject, enveloped)
+	return w.WriteMessages(ctx, kafka.Message{Value: enveloped, Headers: kafkaHeaders(ctx)})
 }
 
 func kafkaHeaders(ctx context.Context) []kafka.Header {
@@ -62,6 +70,9 @@ func (b *broker) Subscribe(ctx context.Context, subject string, handler eventbro
 	if err := b.ensureTopic(ctx, b.deadLetter); err != nil {
 		return err
 	}
+	go func() {
+		_ = (resilience.KafkaRetryQueueConfig{Brokers: b.brokers, Group: b.group, MaxAttempts: resilience.DefaultRetryPolicy.MaxAttempts}).Run(ctx)
+	}()
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     b.brokers,
 		Topic:       subject,
@@ -69,7 +80,7 @@ func (b *broker) Subscribe(ctx context.Context, subject string, handler eventbro
 		StartOffset: kafka.FirstOffset,
 		MinBytes:    1,
 		MaxBytes:    10e6,
-		MaxWait:     500 * time.Millisecond,
+		MaxWait:     50 * time.Millisecond,
 		Dialer:      &kafka.Dialer{Timeout: 5 * time.Second, DualStack: true},
 	})
 	b.mu.Lock()
@@ -82,17 +93,27 @@ func (b *broker) Subscribe(ctx context.Context, subject string, handler eventbro
 			if err != nil {
 				return
 			}
-			attempts := 0
-			err = resilience.Retry(ctx, resilience.RetryPolicyFromEnv(), func(attemptCtx context.Context, attempt int) error {
-				attempts = attempt
-				err := handler(kafkaprop.Context(attemptCtx, msg.Headers), subject, msg.Value)
-				if err != nil {
-					b.log.Error("kafka message handler failed", logging.String("topic", subject), logging.Int("attempt", attempt), logging.Err(err))
-				}
-				return err
-			})
+			attempts := retryAttempt(msg.Headers)
+			payload, _, unwrapErr := commonevents.Unwrap(msg.Value)
+			if unwrapErr != nil {
+				_ = b.deadLetterMessage(ctx, subject, msg, attempts, unwrapErr)
+				continue
+			}
+			transportkafka.Consumed(subject, msg.Partition, msg.Offset, attempts, payload)
+			err = handler(kafkaprop.Context(ctx, msg.Headers), subject, payload)
 			if err == nil {
 				if err := r.CommitMessages(ctx, msg); err != nil {
+					return
+				}
+				continue
+			}
+			var permanent resilience.PermanentError
+			if !errors.As(err, &permanent) && attempts < resilience.DefaultRetryPolicy.MaxAttempts {
+				writer := &kafka.Writer{Addr: kafka.TCP(b.brokers...), Topic: resilience.RetryTopic(b.group), WriteTimeout: 5 * time.Second}
+				queueErr := (resilience.KafkaRetryQueue{Writer: writer}).Enqueue(ctx, msg, subject, attempts+1, err)
+				_ = writer.Close()
+				if queueErr != nil {
+					b.log.Error("kafka retry publish failed", logging.Err(queueErr))
 					return
 				}
 				continue
@@ -129,6 +150,109 @@ func (b *broker) Subscribe(ctx context.Context, subject string, handler eventbro
 		}
 	}()
 	return nil
+}
+
+func retryAttempt(headers []kafka.Header) int {
+	for _, h := range headers {
+		if h.Key == "x-ofm-retry-attempt" {
+			if n, err := strconv.Atoi(string(h.Value)); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return 1
+}
+
+func (b *broker) deadLetterMessage(ctx context.Context, subject string, msg kafka.Message, attempts int, cause error) error {
+	payload, err := resilience.MarshalDLQ(resilience.DLQRecord{OriginalKey: msg.Key, OriginalValue: msg.Value, OriginalTopic: subject, OriginalPartition: msg.Partition, OriginalOffset: msg.Offset, Attempts: attempts, ErrorClass: fmt.Sprintf("%T", cause), Error: cause.Error(), FailedAt: time.Now().UTC()})
+	if err != nil {
+		return err
+	}
+	writer := &kafka.Writer{Addr: kafka.TCP(b.brokers...), Topic: b.deadLetter, WriteTimeout: 5 * time.Second}
+	err = writer.WriteMessages(ctx, kafka.Message{Key: msg.Key, Value: payload})
+	_ = writer.Close()
+	if err != nil {
+		return err
+	}
+	sharedmetrics.IncKafkaDLQ(b.deadLetter)
+	return nil
+}
+
+// SubscribeBatch consumes up to 100 messages or 200ms and commits every
+// message in the successful batch. Passing the complete batch to kafka-go is
+// required because a reader may return messages from multiple partitions;
+// committing only the last message leaves the other partitions lagging.
+func (b *broker) SubscribeBatch(ctx context.Context, subject string, handler eventbroker.BatchMessageHandler) error {
+	r := kafka.NewReader(kafka.ReaderConfig{Brokers: b.brokers, Topic: subject, GroupID: b.group, StartOffset: kafka.FirstOffset, MinBytes: 1, MaxBytes: 10e6, MaxWait: 50 * time.Millisecond, Dialer: &kafka.Dialer{Timeout: 5 * time.Second, DualStack: true}})
+	b.mu.Lock()
+	b.readers = append(b.readers, r)
+	b.mu.Unlock()
+	go func() {
+		defer r.Close()
+		for {
+			messages := make([]eventbroker.Message, 0, 100)
+			first, err := r.FetchMessage(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				b.log.Error("kafka batch fetch failed", logging.String("topic", subject), logging.Err(err))
+				time.Sleep(250 * time.Millisecond)
+				continue
+			}
+			messages = append(messages, toBatchMessage(first))
+			deadline := time.NewTimer(200 * time.Millisecond)
+			for len(messages) < 100 {
+				select {
+				case <-deadline.C:
+					goto process
+				default:
+				}
+				fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Millisecond)
+				msg, fetchErr := r.FetchMessage(fetchCtx)
+				cancel()
+				if fetchErr != nil {
+					break
+				}
+				messages = append(messages, toBatchMessage(msg))
+			}
+		process:
+			if !deadline.Stop() {
+				select {
+				case <-deadline.C:
+				default:
+				}
+			}
+			if err := resilience.Retry(ctx, resilience.RetryPolicy{MaxAttempts: 1}, func(attemptCtx context.Context, _ int) error {
+				return handler(attemptCtx, subject, messages)
+			}); err != nil {
+				b.log.Error("kafka batch handler failed", logging.String("topic", subject), logging.Err(err))
+				continue
+			}
+			commitMessages := make([]kafka.Message, 0, len(messages))
+			for _, message := range messages {
+				commitMessages = append(commitMessages, kafka.Message{
+					Topic: subject, Partition: message.Partition, Offset: message.Offset,
+				})
+			}
+			if err := r.CommitMessages(ctx, commitMessages...); err != nil {
+				b.log.Error("kafka batch commit failed", logging.String("topic", subject), logging.Int("messages", len(commitMessages)), logging.Err(err))
+				if ctx.Err() != nil {
+					return
+				}
+			}
+		}
+	}()
+	return nil
+}
+
+func toBatchMessage(msg kafka.Message) eventbroker.Message {
+	payload, _, _ := commonevents.Unwrap(msg.Value)
+	headers := make([]eventbroker.Header, 0, len(msg.Headers))
+	for _, h := range msg.Headers {
+		headers = append(headers, eventbroker.Header{Key: h.Key, Value: h.Value})
+	}
+	return eventbroker.Message{Key: msg.Key, Value: payload, Partition: msg.Partition, Offset: msg.Offset, Headers: headers}
 }
 
 func (b *broker) ensureTopic(ctx context.Context, topic string) error {
