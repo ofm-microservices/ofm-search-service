@@ -13,6 +13,7 @@ func newApp() *fx.App {
 		appfx.AppModule,
 		appfx.StorageModule,
 		appfx.MessagingModule,
+		appfx.FileModule,
 		appfx.ServiceModule,
 		appfx.PresentationModule,
 	)

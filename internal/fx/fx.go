@@ -9,6 +9,7 @@ var Module = fx.Options(
 	AppModule,
 	StorageModule,
 	MessagingModule,
+	FileModule,
 	ServiceModule,
 	PresentationModule,
 )

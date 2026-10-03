@@ -11,13 +11,15 @@ import (
 const gigIndexedSubject = "search.gig.indexed"
 
 type gigPublishedEvent struct {
-	GigID        string                `json:"gig_id"`
-	FreelancerID string                `json:"freelancer_id"`
-	Slug         string                `json:"slug"`
-	Title        string                `json:"title"`
-	Description  string                `json:"description"`
-	PublishedAt  *time.Time            `json:"published_at,omitempty"`
-	Packages     []gigPublishedPackage `json:"packages"`
+	GigID          string                `json:"gig_id"`
+	FreelancerID   string                `json:"freelancer_id"`
+	SellerUsername string                `json:"seller_username"`
+	Slug           string                `json:"slug"`
+	Title          string                `json:"title"`
+	Description    string                `json:"description"`
+	PictureFileID  string                `json:"picture_file_id"`
+	PublishedAt    *time.Time            `json:"published_at,omitempty"`
+	Packages       []gigPublishedPackage `json:"packages"`
 }
 
 type gigPublishedPackage struct {
@@ -34,12 +36,14 @@ func parseGigPublished(payload []byte) (*gigPublishedEvent, error) {
 
 func buildDocument(event *gigPublishedEvent) domain.GigDocument {
 	doc := domain.GigDocument{
-		ID:           strings.TrimSpace(event.GigID),
-		FreelancerID: strings.TrimSpace(event.FreelancerID),
-		Slug:         strings.TrimSpace(event.Slug),
-		Title:        strings.TrimSpace(event.Title),
-		Description:  strings.TrimSpace(event.Description),
-		PublishedAt:  "",
+		ID:             strings.TrimSpace(event.GigID),
+		FreelancerID:   strings.TrimSpace(event.FreelancerID),
+		SellerUsername: strings.TrimSpace(event.SellerUsername),
+		Slug:           strings.TrimSpace(event.Slug),
+		Title:          strings.TrimSpace(event.Title),
+		Description:    strings.TrimSpace(event.Description),
+		PictureFileID:  strings.TrimSpace(event.PictureFileID),
+		PublishedAt:    "",
 	}
 	if event.PublishedAt != nil {
 		doc.PublishedAt = event.PublishedAt.UTC().Format(time.RFC3339Nano)

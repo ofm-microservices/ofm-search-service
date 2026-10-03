@@ -16,11 +16,24 @@ type EventBroker interface {
 	Close() error
 }
 
+// FileURLClient resolves public file URLs for search document enrichment.
+type FileURLClient interface {
+	GetFileURL(ctx context.Context, fileID string) (string, error)
+}
+
 // SearchService owns gig indexing and public search queries.
 type SearchService interface {
 	ApplyGigPublished(ctx context.Context, payload []byte) error
 	ApplyGigDeleted(ctx context.Context, payload []byte) error
 	Search(ctx context.Context, q domain.SearchQuery) (*domain.SearchPage, error)
+	ApplyGigBatch(ctx context.Context, events []ProjectionEvent) error
+}
+
+// ProjectionEvent is the normalized input for a bulk search projection.
+type ProjectionEvent struct {
+	Payload     []byte
+	AggregateID string
+	Deleted     bool
 }
 
 // SearchResult aliases the public result shape.

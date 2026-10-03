@@ -44,6 +44,12 @@ func (b *bootstrapper) RunMigrations(ctx context.Context, path string) error {
 	return nil
 }
 
+// CreateProcessedEventsIndex creates the durable event-claim index used by
+// the search projection consumer.
+func (b *bootstrapper) CreateProcessedEventsIndex(ctx context.Context) error {
+	return b.cl.createProcessedIndex(ctx)
+}
+
 func readMigrationFile(path string) ([]byte, error) {
 	if after, ok := strings.CutPrefix(path, "file://"); ok {
 		raw := after

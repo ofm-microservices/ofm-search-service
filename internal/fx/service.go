@@ -14,6 +14,6 @@ var ServiceModule = fx.Options(
 )
 
 // ProvideSearchService constructs the search application service.
-func ProvideSearchService(repo domain.SearchRepository, broker eb.EventBroker, lg logging.Logger) (app.SearchService, error) {
-	return app.New(repo, broker, lg)
+func ProvideSearchService(repo domain.SearchRepository, broker eb.EventBroker, files app.FileURLClient, lg logging.Logger) (app.SearchService, error) {
+	return app.New(repo, broker, files, lg)
 }

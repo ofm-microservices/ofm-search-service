@@ -34,16 +34,17 @@ func (m *searchMapper) ToResponse(res *application.SearchResultPage) *searchv1.S
 	out.Services = make([]*searchv1.SearchResult, 0, len(res.Services))
 	for _, item := range res.Services {
 		out.Services = append(out.Services, &searchv1.SearchResult{
-			Id:           item.ID,
-			Title:        item.Title,
-			Description:  item.Description,
-			Picture:      item.Picture,
-			ReviewsCount: item.ReviewsCount,
-			Rating:       item.Rating,
-			MinPrice:     item.MinPrice,
-			Slug:         item.Slug,
-			FreelancerId: item.FreelancerID,
-			PublishedAt:  item.PublishedAt,
+			Id:             item.ID,
+			Title:          item.Title,
+			Description:    item.Description,
+			Picture:        item.Picture,
+			ReviewsCount:   item.ReviewsCount,
+			Rating:         item.Rating,
+			MinPrice:       item.MinPrice,
+			Slug:           item.Slug,
+			FreelancerId:   item.FreelancerID,
+			SellerUsername: item.SellerUsername,
+			PublishedAt:    item.PublishedAt,
 		})
 	}
 	return out
